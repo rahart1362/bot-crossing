@@ -1,4 +1,189 @@
 import * as THREE from 'three'
+
+
+// --- INJECTED CHAT DIALOG UI ---
+let chatPollInterval = null;
+
+function createChatDialog() {
+  const dlg = document.createElement('dialog');
+  dlg.id = 'bc-chat-dialog';
+  dlg.style.cssText = 'position: fixed; bottom: 20px; right: 20px; width: 350px; height: 400px; background: rgba(20,20,28,0.95); border: 1px solid #333; border-radius: 8px; color: #eee; padding: 0; display: flex; flex-direction: column; font-family: monospace; z-index: 9999; backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0,0,0,0.5); margin: 0;';
+  
+  const header = document.createElement('div');
+  header.style.cssText = 'padding: 10px; border-bottom: 1px solid #333; font-weight: bold; display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2);';
+  const title = document.createElement('span');
+  title.id = 'bc-chat-title';
+  title.innerText = 'Agent Chat';
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.innerText = 'X';
+  closeBtn.style.cssText = 'background: none; border: none; color: #aaa; cursor: pointer; font-family: monospace;';
+  closeBtn.onclick = () => { 
+    dlg.style.display = 'none'; 
+    dlg.close(); 
+    if (chatPollInterval) clearInterval(chatPollInterval);
+  };
+  
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  
+  const messages = document.createElement('div');
+  messages.id = 'bc-chat-messages';
+  messages.style.cssText = 'flex: 1; padding: 10px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column; gap: 8px;';
+  
+  const form = document.createElement('form');
+  form.style.cssText = 'padding: 10px; border-top: 1px solid #333; display: flex; gap: 8px; background: rgba(0,0,0,0.2);';
+  
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Message agent...';
+  input.style.cssText = 'flex: 1; background: #111; border: 1px solid #444; color: #fff; padding: 6px; border-radius: 4px; font-family: monospace; outline: none;';
+  
+  const sendBtn = document.createElement('button');
+  sendBtn.innerText = 'Send';
+  sendBtn.style.cssText = 'background: #00D1FF; color: #000; border: none; padding: 0 10px; border-radius: 4px; cursor: pointer; font-weight: bold; font-family: monospace;';
+  
+  form.appendChild(input);
+  form.appendChild(sendBtn);
+  
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    
+    // Optimistic UI update
+    const msgEl = document.createElement('div');
+    msgEl.style.cssText = 'align-self: flex-end; background: #2a2a3a; padding: 6px 10px; border-radius: 6px; max-width: 80%; word-break: break-word;';
+    msgEl.innerText = text;
+    messages.appendChild(msgEl);
+    messages.scrollTop = messages.scrollHeight;
+    input.value = '';
+    
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: text, 
+          root_id: currentRootId,
+          context: (!currentRootId && currentThreadContext) ? { title: currentThreadContext.title, preview: currentThreadContext.preview } : null
+        })
+      });
+      const data = await res.json();
+      if (!currentRootId && data.post && data.post.id) {
+         currentRootId = data.post.id;
+      }
+      pollChat(); // trigger immediate poll
+    } catch(err) {
+      console.error(err);
+    }
+  };
+  
+  dlg.appendChild(header);
+  dlg.appendChild(messages);
+  dlg.appendChild(form);
+  document.body.appendChild(dlg);
+  dlg.style.display = 'none';
+  return dlg;
+}
+
+let chatDialogEl = null;
+let lastPostId = null;
+let currentRootId = null;
+let currentThreadContext = null;
+
+async function pollChat() {
+  if (!currentRootId) return; // Wait for user to start the thread
+  
+  try {
+    const res = await fetch(`/api/chat/history?root_id=${currentRootId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.posts || !data.posts.order) return;
+    
+    const msgs = document.getElementById('bc-chat-messages');
+    if (!msgs) return;
+    
+    // In thread view, data.posts.order[0] is the original post, and the rest are replies.
+    // To see if new replies arrived, check the total number or the latest ID.
+    // Mattermost does not promise an order here, so sort by time and fingerprint on
+    // count + newest edit (the "thinking..." status post is edited in place, then deleted).
+    const posts = data.posts.posts;
+    const ordered = [...data.posts.order].sort((a, b) => posts[a].create_at - posts[b].create_at);
+    const latestPostId = `${ordered.length}:${Math.max(...ordered.map(id => posts[id].update_at || posts[id].create_at))}`;
+    if (latestPostId === lastPostId) return;
+    lastPostId = latestPostId;
+    
+    // Rebuild the history safely
+    const sysNodes = Array.from(msgs.children).filter(n => n.classList.contains('sys-msg'));
+    msgs.innerHTML = '';
+    sysNodes.forEach(n => msgs.appendChild(n));
+    
+    ordered.forEach(id => {
+      const p = posts[id];
+      // Agent replies are posted by n8n with your token, so they are told apart by the from_agent prop.
+      const isBot = p.props && (p.props.from_agent === 'true' || p.props.from_webhook === 'true');
+      const isUser = !isBot;
+      
+      const el = document.createElement('div');
+      el.style.cssText = isUser 
+        ? 'align-self: flex-end; background: #2a2a3a; padding: 6px 10px; border-radius: 6px; max-width: 80%; word-break: break-word; white-space: pre-wrap;'
+        : 'align-self: flex-start; background: rgba(0, 209, 255, 0.1); border: 1px solid rgba(0,209,255,0.3); padding: 6px 10px; border-radius: 6px; max-width: 90%; color: #00D1FF; word-break: break-word; white-space: pre-wrap;';
+      
+      // Strip '@agent ' from user messages so the UI is clean
+      let text = p.message;
+      if (isUser) {
+         if (text.toLowerCase().startsWith('@agent ')) {
+           text = text.substring(7);
+         }
+         // Strip the hidden system context so the UI stays clean
+         const ctxRegex = /\[SYSTEM_CONTEXT:.*?\]\n\n/s;
+         text = text.replace(ctxRegex, '');
+      }
+      el.innerText = text;
+      msgs.appendChild(el);
+    });
+    
+    msgs.scrollTop = msgs.scrollHeight;
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+function showInfraChat(thread) {
+  currentRootId = null;
+  lastPostId = null;
+  currentThreadContext = thread;
+  if (!chatDialogEl) chatDialogEl = createChatDialog();
+  chatDialogEl.style.display = 'flex';
+  if (!chatDialogEl.open) chatDialogEl.show();
+  
+  if (chatPollInterval) clearInterval(chatPollInterval);
+  chatPollInterval = setInterval(pollChat, 3000);
+  
+  document.getElementById('bc-chat-title').innerText = thread.title;
+  const msgs = document.getElementById('bc-chat-messages');
+  msgs.innerHTML = '';
+  
+  // Initial context message
+  const sysEl = document.createElement('div');
+  sysEl.className = 'sys-msg';
+  sysEl.style.cssText = 'align-self: flex-start; background: rgba(0, 209, 255, 0.1); border: 1px solid rgba(0,209,255,0.3); padding: 6px 10px; border-radius: 6px; max-width: 90%; color: #00D1FF;';
+  sysEl.innerText = thread.preview;
+  msgs.appendChild(sysEl);
+  
+  if (thread.hasError) {
+    const errEl = document.createElement('div');
+    errEl.className = 'sys-msg';
+    errEl.style.cssText = 'align-self: flex-start; background: rgba(255, 80, 80, 0.1); border: 1px solid rgba(255,80,80,0.3); padding: 6px 10px; border-radius: 6px; max-width: 90%; color: #ff5050; margin-top: 4px;';
+    errEl.innerText = '🚨 Attention required. Error state detected.';
+    msgs.appendChild(errEl);
+  }
+  
+  pollChat(); // initial load
+}
+// --- END INJECT ---
+
 import './ui/styles.css'
 import { DEFAULT_PRESET, Settings, hasStoredSettings } from './core/settings.js'
 import { Engine } from './core/engine.js'
@@ -385,10 +570,18 @@ const actions = {
     }
   },
 
+
   openThread: async () => {
     const thread = threads.find((t) => t.id === selectedId)
     if (!thread) return
+    
+    if (thread.harness === 'infrastructure') {
+       showInfraChat(thread);
+       return;
+    }
+    
     try {
+
       const shown = await openThread(thread, settings.get('openIn'))
       colony.astronauts.celebrate(thread.id)
       const name = thread.harnessName || 'your harness'

@@ -420,6 +420,43 @@ function readJsonBody(req, limit = 4 * 1024 * 1024) {
   })
 }
 
+/**
+ * Mattermost bridge for the agent chat panel. The token and channel id used to be hardcoded and
+ * both went stale (a revoked token, a channel from a team that no longer exists), so every send
+ * failed while the panel still reported `ok: true`. The token now comes from the agent stack's own
+ * env file — the one n8n and agent-tools already use — and the channel is resolved by name.
+ */
+const MM_URL = process.env.MATTERMOST_URL || 'http://127.0.0.1:8065'
+const MM_TEAM = process.env.MATTERMOST_TEAM || 'wuzzyfuzzy'
+const MM_CHANNEL = process.env.MATTERMOST_AGENT_CHANNEL || 'agent-general'
+const MM_ENV_FILE = process.env.MATTERMOST_ENV_FILE || path.join(os.homedir(), 'agent-infra', 'compose', '.env')
+const MM_POST_ID = /^[a-z0-9]{26}$/
+let mmChannelId = null
+
+/** Read per call, so a rotated token is picked up without restarting the server. */
+async function mmToken() {
+  if (process.env.MATTERMOST_TOKEN) return process.env.MATTERMOST_TOKEN
+  const m = (await fsp.readFile(MM_ENV_FILE, 'utf8')).match(/^MATTERMOST_BOT_TOKEN=["']?([^"'\s]+)/m)
+  if (!m) throw new Error(`MATTERMOST_BOT_TOKEN not found in ${MM_ENV_FILE}`)
+  return m[1]
+}
+
+async function mm(method, route, body) {
+  const res = await fetch(`${MM_URL}/api/v4${route}`, {
+    method,
+    headers: { Authorization: `Bearer ${await mmToken()}`, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(`Mattermost ${method} ${route} → ${res.status}: ${data.message || res.statusText}`)
+  return data
+}
+
+async function agentChannelId() {
+  if (!mmChannelId) mmChannelId = (await mm('GET', `/teams/name/${MM_TEAM}/channels/name/${MM_CHANNEL}`)).id
+  return mmChannelId
+}
+
 /** Connect-style middleware: handles /api/*, passes everything else through. */
 export async function apiMiddleware(req, res, next) {
   const url = new URL(req.url, 'http://localhost')
@@ -471,6 +508,37 @@ export async function apiMiddleware(req, res, next) {
         if (base && current.updatedAt !== base) return send(res, 409, current)
         return send(res, 200, await writeState(body))
       })
+    }
+
+    
+    if (url.pathname === '/api/chat' && req.method === 'POST') {
+      const body = await readJsonBody(req)
+      const prompt = typeof body.message === 'string' ? body.message.trim().replace(/^@agent\s*/i, '') : ''
+      if (!prompt) return send(res, 400, { ok: false, error: 'message is required' })
+      if (body.root_id && !MM_POST_ID.test(body.root_id)) return send(res, 400, { ok: false, error: 'bad root_id' })
+      try {
+        // Node context rides on the root post only; replies inherit it through the thread.
+        const context = !body.root_id && body.context
+          ? `[SYSTEM_CONTEXT: Viewing Node '${body.context.title}'. Data: '${body.context.preview}']\n\n`
+          : ''
+        // The #agent-general outgoing webhook fires only when the first word is exactly "@agent".
+        const payload = { channel_id: await agentChannelId(), message: `@agent ${context}${prompt}` }
+        if (body.root_id) payload.root_id = body.root_id
+        return send(res, 200, { ok: true, post: await mm('POST', '/posts', payload) })
+      } catch (e) {
+        return send(res, 502, { ok: false, error: e.message })
+      }
+    }
+
+    if (url.pathname === '/api/chat/history' && req.method === 'GET') {
+      const rootId = url.searchParams.get('root_id')
+      if (!rootId) return send(res, 200, { ok: true, posts: { order: [], posts: {} } })
+      if (!MM_POST_ID.test(rootId)) return send(res, 400, { ok: false, error: 'bad root_id' })
+      try {
+        return send(res, 200, { ok: true, posts: await mm('GET', `/posts/${rootId}/thread`) })
+      } catch (e) {
+        return send(res, 502, { ok: false, error: e.message })
+      }
     }
 
     if (url.pathname === '/api/open' && req.method === 'POST') {

@@ -685,6 +685,8 @@ export class Hud {
       b.innerHTML =
         '<i class="pip"></i>' +
         `<span class="t">${escapeHtml(t.title || 'Untitled thread')}</span>` +
+        (t.agentRole && t.agentRole !== 'primary' ? `<span class="tag" style="font-size:0.7em;margin-left:4px;padding:2px 4px;background:rgba(255,255,255,0.1);border-radius:4px">${escapeHtml(t.agentRole)}</span>` : '') +
+        (t.subagentCount > 0 ? `<span style="font-size:0.7em;margin-left:4px">🤖x${t.subagentCount}</span>` : '') +
         `<span class="when">${ago(t.lastActivityAt)}</span>` +
         (t.worktree ? `<span class="wt">⑂ ${escapeHtml(t.worktree)}</span>` : '')
       b.addEventListener('click', () => this.actions.focusThread?.(t.id))
@@ -799,6 +801,9 @@ export class Hud {
     // The repo is the panel's own heading now, so the card says what the *thread* is —
     // starting with whose it is, since that decides what Open can do.
     if (thread.harnessName) bits.push(`<span class="tag">${escapeHtml(thread.harnessName)}</span>`)
+    if (thread.agentRole) bits.push(`<span class="tag">${escapeHtml(thread.agentRole)}</span>`)
+    if (thread.subagentCount > 0) bits.push(`<span class="tag">🤖 ${thread.subagentCount} Subagents</span>`)
+    if (thread.recentErrorCount > 0) bits.push(`<span class="tag" style="color:#f44">⚠ ${thread.recentErrorCount} Errors</span>`)
     if (thread.worktree) bits.push(`<span class="tag">⑂ ${escapeHtml(thread.worktree)}</span>`)
     if (thread.gitBranch) bits.push(`<span class="tag">${escapeHtml(thread.gitBranch)}</span>`)
     if (thread.model) bits.push(`<span class="tag">${escapeHtml(shortModel(thread.model))}</span>`)
